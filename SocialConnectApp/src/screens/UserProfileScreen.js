@@ -1,95 +1,127 @@
-import React, { useState, useEffect } from "react";
-import { View, Text, FlatList, Image, StyleSheet, SafeAreaView, ActivityIndicator } from "react-native";
-import { db } from "../firebase/firebaseConfig";
-import { collection, query, where, getDocs, orderBy } from "firebase/firestore";
+import React, { useState, useEffect, useCallback } from "react";
+import { View, Text, FlatList, Image, StyleSheet, SafeAreaView, TouchableOpacity, Alert } from "react-native";
+import { db, auth } from "../firebase/firebaseConfig";
+import { doc, getDoc, updateDoc, arrayUnion, arrayRemove, collection, query, where, getDocs } from "firebase/firestore";
+import Icon from 'react-native-vector-icons/Ionicons';
 
-export default function UserProfileScreen({ route }) {
+export default function UserProfileScreen({ route, navigation }) {
   const { userData } = route.params;
   const [userPosts, setUserPosts] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [isFollowing, setIsFollowing] = useState(false);
+  const [stats, setStats] = useState({ followers: 0, following: 0 });
+  const currentUser = auth.currentUser;
+
+  // Optimized Fetch Function
+  const fetchInfo = useCallback(async () => {
+    if (!currentUser) return;
+
+    try {
+      // Check if following
+      const myDoc = await getDoc(doc(db, "users", currentUser.uid));
+      if (myDoc.exists()) {
+        const followingList = myDoc.data().following || [];
+        setIsFollowing(followingList.includes(userData.uid));
+      }
+      
+      // Get target user stats
+      const userDoc = await getDoc(doc(db, "users", userData.uid));
+      if (userDoc.exists()) {
+        setStats({ 
+          followers: userDoc.data().followers?.length || 0, 
+          following: userDoc.data().following?.length || 0 
+        });
+      }
+
+      // Get posts
+      const q = query(collection(db, "posts"), where("userId", "==", userData.uid));
+      const snap = await getDocs(q);
+      setUserPosts(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    } catch (error) {
+      console.log("Fetch Error:", error);
+    }
+  }, [userData.uid, currentUser]); // Fixed the missing dependency here
 
   useEffect(() => {
-    const fetchUserPosts = async () => {
-      try {
-        setLoading(true);
-        
-        // 1. Pehle simple query try karte hain (without orderBy) taake index ka masla na aaye
-        const q = query(
-          collection(db, "posts"), 
-          where("userId", "==", userData.uid)
-        );
+    fetchInfo();
+  }, [fetchInfo]);
 
-        const querySnapshot = await getDocs(q);
-        let posts = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        
-        // 2. Client-side par sort kar lete hain taake app crash na ho
-        posts.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+  const handleFollow = async () => {
+    const wasFollowing = isFollowing;
+    setIsFollowing(!wasFollowing);
+    setStats(p => ({ ...p, followers: wasFollowing ? p.followers - 1 : p.followers + 1 }));
 
-        setUserPosts(posts);
-      } catch (error) {
-        console.error("Error fetching user posts:", error);
-      } finally {
-        setLoading(false);
+    try {
+      const myRef = doc(db, "users", currentUser.uid);
+      const tarRef = doc(db, "users", userData.uid);
+      
+      if (wasFollowing) {
+        await updateDoc(myRef, { following: arrayRemove(userData.uid) });
+        await updateDoc(tarRef, { followers: arrayRemove(currentUser.uid) });
+      } else {
+        await updateDoc(myRef, { following: arrayUnion(userData.uid) });
+        await updateDoc(tarRef, { followers: arrayUnion(currentUser.uid) });
       }
-    };
-
-    if (userData?.uid) {
-      fetchUserPosts();
+    } catch (e) {
+      setIsFollowing(wasFollowing);
+      setStats(p => ({ ...p, followers: wasFollowing ? p.followers + 1 : p.followers - 1 }));
+      Alert.alert("Error", "Action failed. Please try again.");
     }
-  }, [userData.uid]);
+  };
 
   return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.profileHeader}>
-        <Image 
-          source={{ uri: userData.profilePic || "https://ui-avatars.com/api/?name=" + userData.name }} 
-          style={styles.largeAvatar} 
-        />
-        <Text style={styles.profileName}>{userData.name}</Text>
-        <Text style={styles.profileBio}>{userData.bio || "Hey there! I am using Social Connect."}</Text>
-        
-        <View style={styles.statsRow}>
-          <View style={styles.statBox}>
-            <Text style={styles.statNumber}>{userPosts.length}</Text>
-            <Text style={styles.statLabel}>Posts</Text>
-          </View>
-        </View>
-      </View>
-
-      {loading ? (
-        <ActivityIndicator size="large" color="#007bff" style={{ marginTop: 20 }} />
-      ) : (
-        <FlatList
-          data={userPosts}
-          keyExtractor={(item) => item.id}
-          contentContainerStyle={{ padding: 15 }}
-          renderItem={({ item }) => (
-            <View style={styles.postCard}>
-              <Text style={styles.postText}>{item.text}</Text>
-              <Text style={styles.postDate}>
-                {item.createdAt?.seconds ? new Date(item.createdAt.seconds * 1000).toLocaleDateString() : "Just now"}
-              </Text>
+    <SafeAreaView style={{ flex: 1, backgroundColor: '#fff' }}>
+      <FlatList
+        data={userPosts}
+        keyExtractor={item => item.id}
+        ListHeaderComponent={
+          <View style={styles.header}>
+            <Image 
+              source={{ uri: userData.profilePic || "https://ui-avatars.com/api/?name=" + userData.name }} 
+              style={styles.avatar} 
+            />
+            <Text style={styles.name}>{userData.name}</Text>
+            <View style={styles.statsRow}>
+              <View style={styles.stat}><Text style={styles.statNum}>{userPosts.length}</Text><Text>Posts</Text></View>
+              <View style={styles.stat}><Text style={styles.statNum}>{stats.followers}</Text><Text>Followers</Text></View>
+              <View style={styles.stat}><Text style={styles.statNum}>{stats.following}</Text><Text>Following</Text></View>
             </View>
-          )}
-          ListEmptyComponent={<Text style={styles.emptyText}>No posts yet.</Text>}
-        />
-      )}
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <TouchableOpacity style={[styles.btn, isFollowing && styles.unfollow]} onPress={handleFollow}>
+                <Text style={{ color: isFollowing ? '#333' : '#fff', fontWeight: 'bold' }}>
+                  {isFollowing ? "Unfollow" : "Follow"}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity 
+                style={styles.msgBtn} 
+                onPress={() => navigation.navigate("Chat", { receiverId: userData.uid, userName: userData.name })}
+              >
+                <Icon name="chatbubble-ellipses-outline" size={20} color="#007bff" />
+              </TouchableOpacity>
+            </View>
+          </View>
+        }
+        renderItem={({ item }) => (
+          <View style={styles.post}>
+            <Text style={styles.postText}>{item.text}</Text>
+          </View>
+        )}
+        ListEmptyComponent={<Text style={styles.emptyText}>No posts yet.</Text>}
+      />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#fff" },
-  profileHeader: { alignItems: "center", padding: 30, borderBottomWidth: 1, borderBottomColor: "#f0f0f0" },
-  largeAvatar: { width: 100, height: 100, borderRadius: 50, marginBottom: 15, borderWidth: 3, borderColor: "#f0f7ff" },
-  profileName: { fontSize: 22, fontWeight: "bold", color: "#1a1a1a" },
-  profileBio: { fontSize: 14, color: "#666", marginTop: 5, textAlign: 'center' },
-  statsRow: { flexDirection: "row", marginTop: 20 },
-  statBox: { alignItems: "center", paddingHorizontal: 20 },
-  statNumber: { fontSize: 18, fontWeight: "bold", color: "#007bff" },
-  statLabel: { fontSize: 12, color: "#999" },
-  postCard: { padding: 15, backgroundColor: "#f8f9fa", borderRadius: 15, marginBottom: 10, borderWidth: 1, borderColor: "#eee" },
-  postText: { fontSize: 16, color: "#333" },
-  postDate: { fontSize: 11, color: "#aaa", marginTop: 8 },
-  emptyText: { textAlign: 'center', marginTop: 40, color: '#999' }
+  header: { alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: '#eee' },
+  avatar: { width: 80, height: 80, borderRadius: 40, marginBottom: 10, borderWidth: 1, borderColor: '#007bff' },
+  name: { fontSize: 18, fontWeight: 'bold' },
+  statsRow: { flexDirection: 'row', marginVertical: 15, gap: 30 },
+  stat: { alignItems: 'center' },
+  statNum: { fontWeight: 'bold', fontSize: 16 },
+  btn: { backgroundColor: '#007bff', paddingVertical: 10, paddingHorizontal: 35, borderRadius: 25 },
+  unfollow: { backgroundColor: '#f0f0f0', borderWidth: 1, borderColor: '#ddd' },
+  msgBtn: { borderWidth: 1, borderColor: '#007bff', padding: 10, borderRadius: 25 },
+  post: { padding: 15, borderBottomWidth: 1, borderBottomColor: '#eee', backgroundColor: '#f9f9f9', marginHorizontal: 10, marginTop: 5, borderRadius: 10 },
+  postText: { fontSize: 14, color: '#333' },
+  emptyText: { textAlign: 'center', marginTop: 20, color: '#999' }
 });
